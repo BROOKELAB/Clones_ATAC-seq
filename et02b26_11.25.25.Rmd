@@ -1,0 +1,279 @@
+---
+title: "et02b26"
+author: "Elizabeth Thayer"
+date: "2025-11-25"
+output: html_document
+---
+
+## This is the data analysis for the ATAC-Seq dataset using unstimulated A549 clonal populations
+```{r}
+library(edgeR)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(InTAD)
+library(tibble)
+library(org.Hs.eg.db)
+```
+
+*Loading in the consensus peaks (featureCounts) from the [workshop](https://github.com/hbctraining/Investigating-chromatin-biology-ChIPseq/blob/main/lessons/01_ChIPseq_design_and_workflow.md) pipeline*
+```{r}
+featurecounts_txt <- readr::read_tsv("/Users/ethayer/Google Drive/Grad School/Brooke Lab/Data/et02b26/workshop/consensuscoverage_countmatrix.txt")
+
+#only the counts, no genes or intervals
+featurematrix <- featurecounts_txt[,3:26]
+featurematrix
+```
+
+*Reordering the featurematrix according to IFNL1 expression potential*
+```{r}
+featurematrix_reordered <- featurecounts_txt[,c("et10_1", "et10_2", "et10_3", "et3_1", "et3_2", "et3_3", "et1_1", "et1_2", "et1_3", "wt_1", "wt_2", "wt_3", "et7_1", "et7_2", "et7_3", "et8_1", "et8_2", "et8_3", "et2_1", "et2_2", "et2_3", "et9_1", "et9_2", "et9_3")]
+#put back the genes in the matrix
+featurematrix2 <- cbind(featurecounts_txt$genes, featurematrix)
+featurematrix_reordered2 <- cbind(featurecounts_txt$genes, featurematrix_reordered)
+featurematrix2 <- dplyr::rename(featurematrix2, Genes = "featurecounts_txt$genes")
+featurematrix_reordered2 <- dplyr::rename(featurematrix_reordered2, Genes = "featurecounts_txt$genes")
+featurematrix_reordered2
+```
+
+*Changing the names to gene symbols*
+```{r}
+# translating ensembl id to gene symbol (IFNL1)
+mapped_feature_ids <- mapIds(org.Hs.eg.db, keys=featurematrix_reordered2$Genes,column = "SYMBOL", keytype = "ENSEMBL")
+# if you dont find a name, instead of na, use old symbol (ensembl ENSG00000223972)
+mapped_feature_ids <- ifelse(is.na(mapped_feature_ids), yes = featurematrix_reordered2$Genes, no = mapped_feature_ids)
+# replace old gene names with mapped ones (or unmapped with the weird id)
+featurematrix_reordered2$Genes <- mapped_feature_ids
+
+#put back the intervals in the matrix
+featurematrix_reordered2 <- cbind(featurecounts_txt$interval, featurematrix_reordered2)
+featurematrix_reordered2 <- dplyr::rename(featurematrix_reordered2, Interval = "featurecounts_txt$interval")
+featurematrix_reordered2
+```
+
+*Reading in the annotations, then combining the annotations with the counts*
+```{r}
+annotations_txt <- read.table("/Users/ethayer/Google Drive/Grad School/Brooke Lab/Data/et02b26/workshop/annotatedbed5.txt", sep = "\t", header = FALSE)
+
+annotation_colnames <- c("chromosome", "start", "stop", "chomosome2", "start2", "stop2", "gene", "dot", "strand", "genome", "transcript_type", "dot2", "gene_id", "tss")
+colnames(annotations_txt) <- annotation_colnames
+
+# picking the annotations that matter/aren't redundant
+annotations_txt2 <- annotations_txt[,c(1, 2, 3, 11, 13, 14)]
+
+wholedf <- cbind(annotations_txt2, featurematrix_reordered2)
+wholedf
+```
+
+Filtering out lncRNA, and anything more than 5000 bp upstream of tss
+```{r}
+filtered_df <- wholedf %>%
+  filter(!grepl("lncRNA", gene_id)) %>%
+        filter(tss > -5000)
+
+"IFNL1" %in% filtered_df$Genes
+```
+
+*Checking MAVS peak counts in all the clones*
+This is the template for any other genes of interest
+```{r}
+MAVSpeaks <- wholedf %>% filter(., Genes %in% "MAVS")
+MAVSpeaks_1 <- MAVSpeaks %>%
+  pivot_longer(!c(Genes,Interval, tss, gene_id, transcript_type, stop, start, chromosome), 
+               names_to = "Replicate", values_to = "Counts") %>%
+        mutate(clone = gsub("(\\w+)_(\\w+)", "\\1", Replicate))
+MAVSpeaks_1
+
+# make an average of each column and clone (grouped)
+df_combined <- MAVSpeaks_1 %>%
+  group_by(start, stop, Replicate) %>%
+  summarise(
+    Counts = sum(Counts),
+    gene_id = paste(unique(gene_id), collapse = ","),
+    chromosone = paste(unique(chromosome), collapse = ","),
+    transcript_type = paste(unique(transcript_type), collapse = ","),
+    tss = paste(unique(tss), collapse = ","),
+    Genes = paste(unique(Genes), collapse = ","),
+    #Replicate = paste(unique(Replicate), collapse = ","),
+    .groups = "drop"
+  )
+logtransformedcounts <- log2(MAVSpeaks_1$Counts)
+
+MAVSpeaks_2 <- cbind(MAVSpeaks_1, logtransformedcounts)
+MAVSpeaks_2$clone <- factor(MAVSpeaks_2$clone, levels = c("et10", "et3", "et1", "wt", "et7", "et8", "et2", "et9"))
+
+# rough plotting of MAVS peaks for each interval in each clone
+ggplot(MAVSpeaks_2, aes(x = Interval, y = Counts, color = clone, fill = clone, group = clone))+
+        geom_jitter(position = position_jitterdodge(jitter.width = 0.2, 
+                                                    dodge.width = 2), size = 2)
+```
+
+*Doing differential expression analysis on peak counts*
+First making groups
+```{r}
+my_groupingfeaturematrix <- featurematrix_reordered2 %>% 
+    dplyr::select(c(-1,-2)) %>% 
+    colnames() %>% 
+    gsub(pattern = "_.*", replacement = "", x = .) %>% 
+    factor() %>% 
+    forcats::lvls_reorder(.,rev(rank(as.character(levels(.)))))
+
+new_group10featurematrix <- forcats::fct_relevel(my_groupingfeaturematrix, "et10")
+# converts the count matrix from a df to an actual matrix
+new_group10featurematrix
+```
+
+Making the edgeR object for analysis
+```{r}
+# this is making the edgeR element that you will actually be analyzing
+y_featurematrix <- edgeR::DGEList(counts = featurematrix_reordered2 %>% 
+                        dplyr::select(c(-1,-2)), genes = featurematrix_reordered2[[2]], 
+                        group = new_group10featurematrix)
+keep1_featurematrix <- rowSums(cpm(y_featurematrix) > 0.1) >= 3
+table(keep1_featurematrix)
+y1_featurematrix <- y_featurematrix[keep1_featurematrix,,keep.lib.sizes=FALSE]
+
+y2_featurematrix <- calcNormFactors(y1_featurematrix)
+
+normpeakcounts_featurematrix <- cbind(y2_featurematrix$genes, y2_featurematrix$counts)
+```
+
+```{r}
+design_byET10_featurematrix <- model.matrix(~ new_group10featurematrix)
+y2_featurematrix1 <- estimateDisp(y2_featurematrix, design_byET10_featurematrix)
+y2_featurematrix1$samples$group
+```
+
+
+Making a PCA
+```{r}
+# extracting the values from the PCA to make it look pretty
+y2peaksPCA <- plotMDS(y2_featurematrix1, gene.selection="common")
+
+
+PCAtablepeaks <- as.data.frame(cbind(y2peaksPCA$x, y2peaksPCA$y))
+colnames(PCAtablepeaks) <- c("x", "y")
+rownames(PCAtablepeaks) 
+
+Populationpeaks <- c("ET10","ET10","ET10", "ET1", "ET1", "ET1", "ET2", "ET2", "ET2", "ET3", "ET3", "ET3", "ET7", "ET7", "ET7", "ET8", "ET8", "ET8", "ET9", "ET9", "ET9", "Parent", "Parent", "Parent")
+
+PCAtablepeaks$Populationpeaks <- Populationpeaks
+
+# renaming WT to Parent
+PCAtablepeaks$Populationpeaks <- gsub("WT", "Parent", PCAtablepeaks$Populationpeaks)
+
+PCAtablepeaks$Populationpeaks <- factor(PCAtablepeaks$Populationpeaks, levels=c("Parent", "ET1", "ET2", "ET3", "ET7", "ET8", "ET9", "ET10"))
+```
+
+
+```{r}
+mythemePCApeaks <-   theme(legend.title = element_text(family = "Arial", color = "black", size = 8, 
+                                                  face = "bold"),
+                      panel.background = element_rect(color ="black", linewidth = 0.5),
+                      legend.text = element_text(family = "Arial", color = "black", size = 8),
+                      axis.title.x = element_text(family = "Arial", color = "black", size = 8, 
+                                               face = "bold",
+                                               margin = margin(t = 2.5, r = 0, b = 0, l = 0)),
+                      axis.title.y = element_text(family = "Arial", color = "black", size = 8, 
+                                               face = "bold"),
+                      axis.text.x = element_text(family = "Arial", color = "black", size = 8, 
+                                              margin = margin(t = 2.5, r = 2.5, b = 0, l = 2.5)),
+                      axis.text.y = element_text(family = "Arial", color = "black", size = 8),
+                      panel.grid.minor = element_blank(), #gets rid of grey and lines in the middle
+                      panel.grid.major = element_blank()) #gets rid of grey and lines in the middle
+```
+
+
+```{r fig.height=2, fig.width=2}
+PCAplotindivpeaks <- 
+    ggplot(PCAtablepeaks, aes(x = x, y = y, color = Populationpeaks)) +
+        geom_jitter(size = 0.4, position = position_jitter(height = 0.15, width = 0.15)) +
+        xlab("PC1 (48%)")+
+        ylab("PC2 (28%)")+    
+        theme(legend.position = "none")+
+        scale_y_continuous(limits = c(-2.6, 1.5))+
+        scale_x_continuous(limits = c(-2, 2.3), breaks=seq(-2,2,1))+
+        scale_color_manual(values = c("black", "#364B9AFF", "#4A7BB7FF", "#6EA6CDFF", "#FDB366FF",
+                                  "#F67E4BFF", "#DD3D2DFF", "#A50026FF"))+
+        mythemePCApeaks
+
+PCAplotindivpeaks
+
+#ggsave(filename="et02b26_PCA_11.19.25.png", plot = PCAplotindivpeaks, device="png", units="in", height=2, width=2)
+```
+
+```{r}
+sessionInfo()
+```
+R version 4.2.2 (2022-10-31)
+Platform: aarch64-apple-darwin20 (64-bit)
+Running under: macOS Ventura 13.0
+
+Matrix products: default
+LAPACK: /Library/Frameworks/R.framework/Versions/4.2-arm64/Resources/lib/libRlapack.dylib
+
+locale:
+[1] en_US.UTF-8/en_US.UTF-8/en_US.UTF-8/C/en_US.UTF-8/en_US.UTF-8
+
+attached base packages:
+[1] grid      stats4    stats     graphics  grDevices utils     datasets  methods   base     
+
+other attached packages:
+ [1] InTAD_1.18.0                             MultiAssayExperiment_1.24.0             
+ [3] SummarizedExperiment_1.28.0              MatrixGenerics_1.10.0                   
+ [5] matrixStats_1.4.1                        TxDb.Hsapiens.UCSC.hg38.knownGene_3.16.0
+ [7] GenomicFeatures_1.50.4                   GenomicRanges_1.50.2                    
+ [9] GenomeInfoDb_1.34.9                      lubridate_1.9.3                         
+[11] forcats_1.0.0                            stringr_1.5.1                           
+[13] purrr_1.0.2                              readr_2.1.5                             
+[15] tibble_3.2.1                             tidyverse_2.0.0                         
+[17] paletteer_1.6.0                          circlize_0.4.16                         
+[19] ComplexHeatmap_2.14.0                    gtools_3.9.5                            
+[21] tidyr_1.3.1                              dplyr_1.1.4                             
+[23] edgeR_3.40.2                             limma_3.54.2                            
+[25] org.Hs.eg.db_3.16.0                      AnnotationDbi_1.60.2                    
+[27] IRanges_2.32.0                           S4Vectors_0.36.2                        
+[29] Biobase_2.58.0                           BiocGenerics_0.44.0                     
+[31] ggplot2_3.5.1                           
+
+loaded via a namespace (and not attached):
+  [1] backports_1.5.0          BiocFileCache_2.6.1      systemfonts_1.1.0       
+  [4] plyr_1.8.9               splines_4.2.2            BiocParallel_1.32.6     
+  [7] digest_0.6.37            foreach_1.5.2            htmltools_0.5.8.1       
+ [10] magick_2.8.5             fansi_1.0.6              magrittr_2.0.3          
+ [13] memoise_2.0.1            cluster_2.1.6            doParallel_1.0.17       
+ [16] tzdb_0.4.0               Biostrings_2.66.0        vroom_1.6.5             
+ [19] timechange_0.3.0         prettyunits_1.2.0        colorspace_2.1-1        
+ [22] blob_1.2.4               rappdirs_0.3.3           textshaping_0.4.0       
+ [25] xfun_0.47                crayon_1.5.3             RCurl_1.98-1.16         
+ [28] prismatic_1.1.2          iterators_1.0.14         glue_1.7.0              
+ [31] pals_1.9                 gtable_0.3.5             zlibbioc_1.44.0         
+ [34] XVector_0.38.0           GetoptLong_1.0.5         DelayedArray_0.24.0     
+ [37] car_3.1-2                shape_1.4.6.1            maps_3.4.2              
+ [40] abind_1.4-8              scales_1.3.0             DBI_1.2.3               
+ [43] rstatix_0.7.2            Rcpp_1.0.13              progress_1.2.3          
+ [46] clue_0.3-65              bit_4.5.0                mapproj_1.2.11          
+ [49] mclust_6.1.1             httr_1.4.7               RColorBrewer_1.1-3      
+ [52] pkgconfig_2.0.3          XML_3.99-0.17            farver_2.1.2            
+ [55] dbplyr_2.5.0             locfit_1.5-9.10          utf8_1.2.4              
+ [58] reshape2_1.4.4           tidyselect_1.2.1         labeling_0.4.3          
+ [61] rlang_1.1.4              munsell_0.5.1            tools_4.2.2             
+ [64] cachem_1.1.0             cli_3.6.3                generics_0.1.3          
+ [67] RSQLite_2.3.7            broom_1.0.6              evaluate_1.0.0          
+ [70] fastmap_1.2.0            yaml_2.3.10              ragg_1.3.3              
+ [73] rematch2_2.1.2           knitr_1.48               bit64_4.5.2             
+ [76] KEGGREST_1.38.0          xml2_1.3.6               biomaRt_2.54.1          
+ [79] compiler_4.2.2           rstudioapi_0.16.0        filelock_1.0.3          
+ [82] curl_5.2.3               png_0.1-8                ggsignif_0.6.4          
+ [85] statmod_1.5.0            stringi_1.8.4            lattice_0.22-6          
+ [88] Matrix_1.6-5             vctrs_0.6.5              pillar_1.9.0            
+ [91] lifecycle_1.0.4          GlobalOptions_0.1.2      bitops_1.0-8            
+ [94] rtracklayer_1.58.0       qvalue_2.30.0            R6_2.5.1                
+ [97] BiocIO_1.8.0             codetools_0.2-20         dichromat_2.0-0.1       
+[100] rjson_0.2.23             withr_3.0.1              GenomicAlignments_1.34.1
+[103] Rsamtools_2.14.0         GenomeInfoDbData_1.2.9   parallel_4.2.2          
+[106] hms_1.1.3                rmarkdown_2.28           carData_3.0-5           
+[109] ggpubr_0.6.0             restfulr_0.0.15         
+
+
