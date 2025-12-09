@@ -16,7 +16,7 @@ This repository contains the scripts (or templates of scripts) used to process t
 :white_check_mark: Creating an annotated peak count matrix for all of the samples in one .bed file which can be converted to .txt
 
 ### In addition to the processing pipeline
-There is a .Rmd file that contains the downstrean analysis of the ATAC data using the peak count matrix. You will need:\
+There is a .Rmd file that contains the downstrean analysis of the ATAC data using the peak count matrix. You will need:
 * edgeR
 * TxDb.Hsapiens.UCSC.hg38.knownGene
 * dplyr
