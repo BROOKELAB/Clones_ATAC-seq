@@ -1,6 +1,6 @@
 # Clones_ATAC-seq
 _ATAC-seq analysis for the A549 clonal populations_\
-Scripts associated with the ATAC-seq data in Single-cell heterogeneity in interferon induction potential is heritable and governed by variation in cell state, Thayer et al. (2025).
+Scripts associated with the ATAC-seq data in Single-cell heterogeneity in interferon induction potential is heritable and governed by variation in cell state, Thayer et al. (2026).
 
 ## Overview
 This repository contains the scripts (or templates of scripts) used to process the ATAC-seq data collected from clonal A549 populations. Some scripts are used for each clonal population and are therefore reused; in such cases, the script shown will serve as an example/template for that step in the process. The majority of the pipeline is following the instructions from https://github.com/hbctraining/Investigating-chromatin-biology-ChIPseq/tree/main/lessons. 
